@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "jvm_core",
+  "jvm_macros"
+]
+resolver = "2"
