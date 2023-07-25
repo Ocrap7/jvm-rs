@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 bitflags = "2.3.3"
 jvm-macros = { path = "../jvm_macros" }
+tracing = "0.1.37"

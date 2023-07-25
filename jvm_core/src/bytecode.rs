@@ -2,7 +2,7 @@ use bitflags::bitflags;
 
 use jvm_macros::StreamReader;
 
-use crate::byte_stream::{ByteStream, StreamRead, ReaderContext};
+use crate::{byte_stream::{ByteStream, ReaderContext, StreamRead}, bytecode::attribute_info::StackMapTable};
 
 macro_rules! impl_read {
     ($ty:ty) => {
@@ -104,6 +104,30 @@ impl ClassFile {
             attributes,
         }
     }
+
+    pub fn methods(&self) -> &[MethodInfo] {
+        &self.methods
+    }
+
+    pub fn get_str(&self, index: usize) -> &str {
+        match &self.constant_pools[index] {
+            ConstantPool::Utf8(str) => str.as_str(),
+            _ => panic!("Expected string constant"),
+        }
+    }
+
+    pub fn class_name(&self) -> &str {
+        match &self.constant_pools[self.this_class as usize] {
+            ConstantPool::Class(constant_pool::Class { name_index, .. }) => {
+                return self.get_str(*name_index as usize)
+            }
+            _ => panic!("Expected class name!"),
+        }
+    }
+
+    pub fn pool(&self, index: usize) -> &ConstantPool {
+        &self.constant_pools[index]
+    }
 }
 
 bitflags! {
@@ -191,7 +215,9 @@ impl StreamRead for ConstantPool {
             constant_pool::Integer::TAG => Self::Integer(constant_pool::Numeric::read(stream, ctx)),
             constant_pool::Float::TAG => Self::Float(constant_pool::Numeric::read(stream, ctx)),
             constant_pool::Long::TAG => Self::Long(constant_pool::LongNumeric::read(stream, ctx)),
-            constant_pool::Double::TAG => Self::Double(constant_pool::LongNumeric::read(stream, ctx)),
+            constant_pool::Double::TAG => {
+                Self::Double(constant_pool::LongNumeric::read(stream, ctx))
+            }
             constant_pool::NameAndType::TAG => {
                 Self::NameAndType(constant_pool::NameAndType::read(stream, ctx))
             }
@@ -210,47 +236,41 @@ impl StreamRead for ConstantPool {
     }
 }
 
-mod constant_pool {
+pub mod constant_pool {
     use jvm_macros::StreamReader;
 
     use crate::byte_stream::StreamRead;
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct Class {
-        name_index: u16,
+        pub name_index: u16,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct Ref {
-        class_index: u16,
-        name_and_type_index: u16,
+        pub class_index: u16,
+        pub name_and_type_index: u16,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct String {
-        string_index: u16,
+        pub string_index: u16,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct Numeric {
-        bytes: u32,
+        pub bytes: u32,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct LongNumeric {
-        bytes: u64,
+        pub bytes: u64,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct NameAndType {
-        name_index: u16,
-        descriptor_index: u16,
+        pub name_index: u16,
+        pub descriptor_index: u16,
     }
 
     #[derive(Clone, Debug)]
@@ -264,24 +284,21 @@ mod constant_pool {
         }
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct MethodHandle {
-        reference_kind: u8,
-        reference_index: u16,
+        pub reference_kind: u8,
+        pub reference_index: u16,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct MethodType {
-        descriptor_index: u16,
+        pub descriptor_index: u16,
     }
 
-    #[repr(packed)]
     #[derive(Clone, Copy, Debug, StreamReader)]
     pub struct InvokeDynamic {
-        bootstrap_method_attr_index: u16,
-        name_and_type_index: u16,
+        pub bootstrap_method_attr_index: u16,
+        pub name_and_type_index: u16,
     }
 
     pub struct MethodRef;
@@ -293,7 +310,10 @@ mod constant_pool {
     pub struct Double;
 
     impl StreamRead for Utf8 {
-        fn read<'a>(stream: &mut crate::byte_stream::ByteStream<'a>, ctx: &crate::byte_stream::ReaderContext) -> Self {
+        fn read<'a>(
+            stream: &mut crate::byte_stream::ByteStream<'a>,
+            ctx: &crate::byte_stream::ReaderContext,
+        ) -> Self {
             let len = stream.read::<u16>(ctx) as usize;
             stream.index += len;
 
@@ -330,13 +350,28 @@ pub struct FieldInfo {
     attributes: Vec<AttributeInfo>,
 }
 
-#[derive(Debug, StreamReader)]
+#[derive(Debug, StreamReader, Clone)]
 pub struct MethodInfo {
     access_flags: AccessFlags,
-    name_index: u16,
-    descriptor_index: u16,
+    pub name_index: u16,
+    pub descriptor_index: u16,
     #[many(u16)]
     attributes: Vec<AttributeInfo>,
+}
+
+impl MethodInfo {
+    pub fn name<'a>(&'a self, file: &'a ClassFile) -> &'a str {
+        file.get_str(self.name_index as usize)
+    }
+
+    pub fn code(&self) -> Option<attribute_info::Code> {
+        self.attributes
+            .iter()
+            .find_map(|attr| match &attr.attribute {
+                Attribute::Code(code) => Some(code.clone()),
+                _ => None,
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -355,15 +390,23 @@ impl StreamRead for AttributeInfo {
         let old_index = stream.index;
 
         let attribute = match attr {
-            ConstantPool::Utf8(str) => {
-                match str.as_str() {
-                    attribute_info::Code::TAG => Attribute::Code(attribute_info::Code::read(stream, ctx)),
-                    attribute_info::LineNumberTable::TAG => Attribute::LineNumberTable(attribute_info::LineNumberTable::read(stream, ctx)),
-                    attribute_info::SourceFile::TAG => Attribute::SourceFile(attribute_info::SourceFile::read(stream, ctx)),
-                    _ => panic!("Unknown attribute '{}'!", str.as_str()),
+            ConstantPool::Utf8(str) => match str.as_str() {
+                attribute_info::Code::TAG => {
+                    Attribute::Code(attribute_info::Code::read(stream, ctx))
                 }
-            }
-            _ => panic!("Expected string in attribute index!")
+                attribute_info::LineNumberTable::TAG => {
+                    Attribute::LineNumberTable(attribute_info::LineNumberTable::read(stream, ctx))
+                }
+                attribute_info::SourceFile::TAG => {
+                    Attribute::SourceFile(attribute_info::SourceFile::read(stream, ctx))
+                }
+                attribute_info::StackMapTable::TAG => {
+                    stream.index += len;
+                    Attribute::StackMapTable(StackMapTable {})
+                }
+                _ => panic!("Unknown attribute '{}'!", str.as_str()),
+            },
+            _ => panic!("Expected string in attribute index!"),
         };
 
         let dlength = stream.index - old_index;
@@ -381,32 +424,35 @@ pub enum Attribute {
     Code(attribute_info::Code),
     LineNumberTable(attribute_info::LineNumberTable),
     SourceFile(attribute_info::SourceFile),
+    StackMapTable(attribute_info::StackMapTable),
 }
 
-mod attribute_info {
+pub mod attribute_info {
     use jvm_macros::StreamReader;
+
+    use crate::byte_stream::StreamRead;
 
     use super::{AttributeInfo, ExceptionEntry};
 
     #[derive(Debug, Clone, StreamReader)]
     pub struct Code {
-        max_stack: u16,
-        max_locals: u16,
+        pub max_stack: u16,
+        pub max_locals: u16,
 
         #[many(u32)]
-        instructions: Vec<super::Op>,
+        pub instructions: Vec<u8>,
 
         #[many(u16)]
-        exception_table: Vec<ExceptionEntry>,
+        pub exception_table: Vec<ExceptionEntry>,
 
         #[many(u16)]
-        attributes: Vec<AttributeInfo>,
+        pub attributes: Vec<AttributeInfo>,
     }
 
     #[derive(Debug, Clone, StreamReader)]
     pub struct LineNumberTable {
         #[many(u16)]
-        entries: Vec<LineNumber>
+        entries: Vec<LineNumber>,
     }
 
     #[derive(Debug, Clone, StreamReader)]
@@ -419,17 +465,27 @@ mod attribute_info {
     pub struct SourceFile {
         source_file_index: u16,
     }
-    
+
+    #[derive(Debug, Clone, StreamReader)]
+    pub struct StackMapTable {
+        // #[many(u16)]
+        // entries: Vec<StackMapFrame>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct StackMapFrame {}
+
     impl_tag!(@str Code, "Code");
     impl_tag!(@str LineNumberTable, "LineNumberTable");
     impl_tag!(@str SourceFile, "SourceFile");
+    impl_tag!(@str StackMapTable, "StackMapTable");
 }
 
 #[derive(Debug, Clone, StreamReader)]
-struct Op(u8);
+pub struct Op(u8);
 
 #[derive(Debug, Clone, StreamReader)]
-struct ExceptionEntry {
+pub struct ExceptionEntry {
     start_pc: u16,
     end_pc: u16,
     handler_pc: u16,
