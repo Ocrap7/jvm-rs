@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 #[derive(Debug, Clone)]
 pub enum Value {
+    Uninit,
     Null,
     Boolean(bool),
     Char(i16),
@@ -15,9 +16,33 @@ pub enum Value {
     ReturnAdress,
 }
 
+impl Value {
+    pub fn matches_type(&self, ty: &Type) -> bool {
+        match (self, &ty.kind) {
+            (Value::Boolean(_), TypeKind::Boolean)
+            | (Value::Char(_), TypeKind::Char)
+            | (Value::Short(_), TypeKind::Short)
+            | (Value::Int(_), TypeKind::Int)
+            | (Value::Long(_), TypeKind::Long)
+            | (Value::Float(_), TypeKind::Float)
+            | (Value::Double(_), TypeKind::Double)
+            | (Value::Reference, TypeKind::Reference) => true,
+            _ => false,
+        }
+    }
+    //     pub fn set(&mut self, other: Value) -> Result<(), ()> {
+    //         match (self, other) {
+    //             (Value::Null, Value::Null) => (),
+    //             (Value::Boolean())
+    //         }
+
+    //         Ok(())
+}
+
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Value::Uninit => write!(f, "null"),
             Value::Null => write!(f, "null"),
             Value::Boolean(b) => write!(f, "{b}"),
             Value::Char(b) => write!(f, "{b}"),
@@ -181,6 +206,7 @@ macro_rules! impl_op {
 impl Value {
     pub fn as_str(&self) -> &str {
         match self {
+            Value::Uninit => "unitit",
             Value::Null => "null",
             Value::Boolean(_) => "boolean",
             Value::Char(_) => "char",
@@ -454,11 +480,18 @@ pub enum RuntimePool {
 pub mod runtime_pool {
     use std::collections::HashMap;
 
-    use super::{Type, TypeKind};
+    use super::{Type, TypeKind, Value};
 
     #[derive(Debug)]
     pub struct Class {
         pub methods: HashMap<String, Method>,
+        pub fields: HashMap<String, Field>,
+    }
+
+    #[derive(Debug)]
+    pub struct Field {
+        pub ty: Type,
+        pub value: Value,
     }
 
     #[derive(Debug)]

@@ -194,6 +194,7 @@ pub enum Instruction {
     ALoad0 = 0x2a,
 
     // Object methods
+    PutStatic = 0xb3,
     InvokeStatic = 0xb8,
     InvokeSpecial = 0xb7,
 }
@@ -237,6 +238,7 @@ impl Instruction {
 
             Instruction::InvokeStatic => 2,
             Instruction::InvokeSpecial => 2,
+            Instruction::PutStatic => 2,
             _ => 0,
         }
     }

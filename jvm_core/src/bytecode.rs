@@ -109,6 +109,10 @@ impl ClassFile {
         &self.methods
     }
 
+    pub fn fields(&self) -> &[FieldInfo] {
+        &self.fields
+    }
+
     pub fn get_str(&self, index: usize) -> &str {
         match &self.constant_pools[index] {
             ConstantPool::Utf8(str) => str.as_str(),
@@ -341,13 +345,19 @@ pub mod constant_pool {
     impl_tag!(InvokeDynamic, 18);
 }
 
-#[derive(Debug, StreamReader)]
+#[derive(Debug, StreamReader, Clone)]
 pub struct FieldInfo {
     access_flags: AccessFlags,
-    name_index: u16,
-    descriptor_index: u16,
+    pub name_index: u16,
+    pub descriptor_index: u16,
     #[many(u16)]
     attributes: Vec<AttributeInfo>,
+}
+
+impl FieldInfo {
+    pub fn name<'a>(&'a self, file: &'a ClassFile) -> &'a str {
+        file.get_str(self.name_index as usize)
+    }
 }
 
 #[derive(Debug, StreamReader, Clone)]

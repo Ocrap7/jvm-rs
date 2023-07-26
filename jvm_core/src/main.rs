@@ -35,6 +35,7 @@ fn main() {
     let runtime = Rf::new(runtime::Runtime::new(vec![file]));
     let (status, thread) = runtime::Runtime::start(runtime.clone(), "Test/Main");
 
+    let rt = runtime.borrow();
     // println!("{:#?}", rt);
     // println!("{:?} {:#?}", status, thread);
 }

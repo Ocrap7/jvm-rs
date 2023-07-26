@@ -1,21 +1,20 @@
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::Arc,
 };
 
 use crate::{
-    bytecode::{constant_pool, ClassFile, ConstantPool},
+    bytecode::{ClassFile, ConstantPool},
     error::{Result, VmError},
     frame::Frame,
-    instructions, main,
+    instructions,
     rf::Rf,
     thread::Thread,
     value::{runtime_pool, RuntimePool, Type, Value},
 };
 
 pub struct Runtime {
-    bootstrap: HashSet<String>,
+    initialized: HashSet<String>,
 
     class_files: HashMap<String, ClassFile>,
 
@@ -28,7 +27,7 @@ pub struct Runtime {
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Runtime")
-            .field("bootstrap", &self.bootstrap)
+            .field("initializeda", &self.initialized)
             .field("class_files", &self.class_files)
             .field("code_pool", &self.code_pool)
             .field("runtime_pool", &self.runtime_pool)
@@ -45,7 +44,7 @@ impl Runtime {
         );
 
         Runtime {
-            bootstrap: HashSet::new(),
+            initialized: HashSet::new(),
             class_files,
             code_pool: Vec::new(),
             runtime_pool: HashMap::new(),
@@ -93,7 +92,7 @@ impl Runtime {
     pub fn load_class(&mut self, class: &str) -> Result<()> {
         {
             if let Some(class_file) = self.class_files.get(class) {
-                self.bootstrap.insert(class.to_string());
+                // self.bootstrap.insert(class.to_string());
             } else {
                 return Err(VmError::ClassNotFound(class.to_string()));
             }
@@ -103,15 +102,18 @@ impl Runtime {
     }
 
     pub fn link_class(&mut self, class_name: &str) -> Result<Rc<str>> {
-        if !self.bootstrap.contains(class_name) {
-            panic!("Class not linked!")
-        }
-
         use crate::value::runtime_pool::*;
 
         let methods: Vec<_> = self
             .get_class(class_name)
             .methods()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let fields: Vec<_> = self
+            .get_class(class_name)
+            .fields()
             .into_iter()
             .cloned()
             .collect();
@@ -153,7 +155,28 @@ impl Runtime {
             res
         }));
 
-        let class = Class { methods };
+        let static_fields = HashMap::from_iter(fields.into_iter().map(|field| {
+            let class_file = self.get_class(class_name);
+
+            let ConstantPool::Utf8(nat) = class_file.pool(field.descriptor_index as usize) else {
+                panic!("Expected method signature string!");
+            };
+
+            let ty = Type::from(nat.as_str());
+
+            (
+                field.name(class_file).to_string(),
+                Field {
+                    ty,
+                    value: Value::Uninit,
+                },
+            )
+        }));
+
+        let class = Class {
+            methods,
+            fields: static_fields,
+        };
 
         let name: Rc<str> = class_name.into();
         self.runtime_pool
@@ -161,6 +184,16 @@ impl Runtime {
 
         Ok(name)
     }
+
+    // pub fn initialize_class(&mut self, lass_name: &str) {
+    //     if self.initialized.contains(class_name) {
+    //         return;
+    //     }
+
+    //     let class_file = self.get_class(class_name);
+
+    // class_file.
+    // }
 
     fn get_class(&self, class: &str) -> &ClassFile {
         self.class_files
@@ -198,7 +231,7 @@ impl Runtime {
     }
 
     /// Load a class item if it hasn't been already.
-    /// 
+    ///
     /// `class` is the name of the current class file. This is used to read the constant pool
     /// `index` is an index into the `class`'s constant pool
     pub fn get_or_load_class_item(&mut self, class: &str, index: u16) -> Option<Rc<str>> {
@@ -220,6 +253,89 @@ impl Runtime {
         };
 
         self.get_or_load_class(&class_name).ok()
+    }
+
+    pub fn get_field_by_index(
+        &self,
+        class: &str,
+        index: u16,
+    ) -> Option<(&str, &str, &runtime_pool::Field)> {
+        let Some(file) = self.class_files.get(class) else {
+            return None;
+        };
+
+        let (ConstantPool::MethodRef(cref) | ConstantPool::FieldRef(cref) | ConstantPool::InterfaceMethodRef(cref)) = file.pool(index as usize) else {
+            return None;
+        };
+
+        let ConstantPool::Class(class_pool) = file.pool(cref.class_index as usize) else {
+            return None
+        };
+
+        let class_name = file.get_str(class_pool.name_index as usize);
+
+        let Some((name, _)) = self.get_name_and_type(class, cref.name_and_type_index) else {
+            return None
+        };
+
+        self.runtime_pool
+            .get(class_name)
+            .map(|c| match c {
+                RuntimePool::Class(class) => class.fields.get(name),
+            })
+            .flatten()
+            .map(|method| (class_name, name, method))
+    }
+
+    pub fn get_field_by_index_mut(
+        &mut self,
+        class: &str,
+        index: u16,
+    ) -> Option<(Rc<str>, &mut runtime_pool::Field)> {
+        let Some(file) = self.class_files.get(class) else {
+            return None;
+        };
+
+        let (ConstantPool::MethodRef(cref) | ConstantPool::FieldRef(cref) | ConstantPool::InterfaceMethodRef(cref)) = file.pool(index as usize) else {
+            return None;
+        };
+
+        let ConstantPool::Class(class_pool) = file.pool(cref.class_index as usize) else {
+            return None
+        };
+
+        let class_name = file.get_str(class_pool.name_index as usize);
+
+        let Some((name, _)) = self.get_name_and_type(class, cref.name_and_type_index) else {
+            return None
+        };
+        // let name = class_name.to_string();
+        let field_name = name.to_string();
+        let (class_name, _) = self.runtime_pool.get_key_value(class_name)?;
+        let class_name = class_name.clone();
+
+        self.runtime_pool
+            .get_mut(&class_name)
+            .map(|c| match c {
+                RuntimePool::Class(class) => class.fields.get_mut(&field_name),
+            })
+            .flatten()
+            .map(|field| (class_name.clone(), field))
+    }
+
+    pub fn get_method_by_name(
+        &self,
+        class_name: &str,
+        name: &str,
+    ) -> Option<&runtime_pool::Method> {
+        self.runtime_pool
+            .get(class_name)
+            .map(|c| {
+                match c {
+                    RuntimePool::Class(class) => class.methods.get(name), // _ => None
+                }
+            })
+            .flatten()
     }
 
     pub fn get_method_by_index(
@@ -245,14 +361,7 @@ impl Runtime {
             return None
         };
 
-        self.runtime_pool
-            .get(class_name)
-            .map(|c| {
-                match c {
-                    RuntimePool::Class(class) => class.methods.get(name), // _ => None
-                }
-            })
-            .flatten()
+        self.get_method_by_name(class_name, name)
             .map(|method| (class_name, name, method))
     }
 
@@ -262,6 +371,14 @@ impl Runtime {
         };
 
         func(params)
+    }
+
+    pub fn is_class_initialized(&self, class: &str) -> bool {
+        self.initialized.contains(class)
+    }
+
+    pub fn set_class_initialized(&mut self, class: &str) {
+        self.initialized.insert(class.to_string());
     }
 
     fn setup_native_functions() -> HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value> + 'static>>
