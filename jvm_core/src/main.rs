@@ -18,6 +18,8 @@ mod value;
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_file(true)
+        .with_line_number(true)
         .init();
 
     let path = Path::new("examples/Main.class");

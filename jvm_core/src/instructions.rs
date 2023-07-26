@@ -185,15 +185,49 @@ pub enum Instruction {
     IfNotNull = 0xc7,
 
     Return = 0xb1,
+    IReturn = 0xac,
+    LReturn = 0xad,
+    FReturn = 0xae,
+    DReturn = 0xaf,
 
     Pop = 0x57,
     Pop2 = 0x58,
     Swap = 0x5f,
 
     // Array Methods
+    ALoad = 0x19,
     ALoad0 = 0x2a,
+    ALoad1 = 0x2b,
+    ALoad2 = 0x2c,
+    ALoad3 = 0x2d,
+
+    AStore = 0x3a,
+    AStore0 = 0x4b,
+    AStore1 = 0x4c,
+    AStore2 = 0x4d,
+    AStore3 = 0x4e,
+
+    CALoad = 0x34,
+    BALoad = 0x33,
+    SALoad = 0x35,
+    IALoad = 0x2e,
+    LALoad = 0x2f,
+    FALoad = 0x30,
+    DALoad = 0x31,
+
+    CAStore = 0x55,
+    BAStore = 0x54,
+    SAStore = 0x56,
+    IAStore = 0x4f,
+    LAStore = 0x50,
+    FAStore = 0x51,
+    DAStore = 0x52,
+
+    NewArray = 0xbc,
+    ArrayLength = 0xbe,
 
     // Object methods
+    GetStatic = 0xb2,
     PutStatic = 0xb3,
     InvokeStatic = 0xb8,
     InvokeSpecial = 0xb7,
@@ -236,9 +270,14 @@ impl Instruction {
             Instruction::IfNotNull => 2,
             Instruction::IfNull => 2,
 
+            Instruction::ALoad => 1,
+            Instruction::AStore => 1,
+            Instruction::NewArray => 1,
+
             Instruction::InvokeStatic => 2,
             Instruction::InvokeSpecial => 2,
             Instruction::PutStatic => 2,
+            Instruction::GetStatic => 2,
             _ => 0,
         }
     }

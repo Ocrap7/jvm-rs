@@ -1,4 +1,6 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
+
+use crate::rf::Rf;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -12,11 +14,27 @@ pub enum Value {
     Long(i64),
     Float(f32),
     Double(f64),
+    ArrayRef(Rf<Vec<Value>>),
     Reference,
     ReturnAdress,
 }
 
 impl Value {
+    pub fn default_with_type(ty: &Type) -> Value {
+        match ty.kind {
+            TypeKind::Byte => Value::Byte(0),
+            TypeKind::Char => Value::Char(0),
+            TypeKind::Short => Value::Short(0),
+            TypeKind::Int => Value::Int(0),
+            TypeKind::Long => Value::Long(0),
+            TypeKind::Float => Value::Float(0.0),
+            TypeKind::Double => Value::Double(0.0),
+            TypeKind::Boolean => Value::Boolean(false),
+            TypeKind::Reference => Value::Reference,
+            TypeKind::Class(_) => Value::Null,
+        }        
+    }
+
     pub fn matches_type(&self, ty: &Type) -> bool {
         match (self, &ty.kind) {
             (Value::Boolean(_), TypeKind::Boolean)
@@ -27,6 +45,10 @@ impl Value {
             | (Value::Float(_), TypeKind::Float)
             | (Value::Double(_), TypeKind::Double)
             | (Value::Reference, TypeKind::Reference) => true,
+            (Value::ArrayRef(a), _) => {
+                let arr = a.borrow();
+                arr[0].matches_type(ty)
+            }
             _ => false,
         }
     }
@@ -52,6 +74,11 @@ impl Display for Value {
             Value::Long(b) => write!(f, "{b}"),
             Value::Float(b) => write!(f, "{b}"),
             Value::Double(b) => write!(f, "{b}"),
+            Value::ArrayRef(b) => {
+                let a = b.borrow();
+                let arr = &*a;
+                write!(f, "{}", arr.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", "))
+            },
             Value::Reference => write!(f, "@"),
             Value::ReturnAdress => write!(f, "@"),
         }
@@ -217,6 +244,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Double(_) => "double",
             Value::Reference => "reference",
+            Value::ArrayRef(_)=> "arrayref",
             Value::ReturnAdress => "return address",
         }
     }
@@ -295,6 +323,13 @@ impl Value {
         match self {
             Self::Double(i) => *i,
             _ => panic!("Expected float value!"),
+        }
+    }
+
+    pub fn as_array(&self) -> &Rf<Vec<Value>> {
+        match self {
+            Self::ArrayRef(i) => i,
+            _ => panic!("Expected array value!"),
         }
     }
 }
@@ -395,6 +430,20 @@ impl Type {
         }
     }
 
+    pub const fn from_array_tag(tag: u8) -> Type {
+        match tag {
+            4 => Type::boolean(),
+            5 => Type::char(),
+            6 => Type::float(),
+            7 => Type::double(),
+            8 => Type::byte(),
+            9 => Type::short(),
+            10 => Type::int(),
+            11 => Type::long(),
+            _ => panic!("Unknown type used in array!"),
+        }        
+    }
+
     pub const fn boolean() -> Type {
         Type {
             array_dimensions: 0,
@@ -406,6 +455,20 @@ impl Type {
         Type {
             array_dimensions: 0,
             kind: TypeKind::Char,
+        }
+    }
+
+    pub const fn float() -> Type {
+        Type {
+            array_dimensions: 0,
+            kind: TypeKind::Float,
+        }
+    }
+
+    pub const fn double() -> Type {
+        Type {
+            array_dimensions: 0,
+            kind: TypeKind::Double,
         }
     }
 

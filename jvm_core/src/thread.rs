@@ -3,11 +3,11 @@ use std::{cell::Cell, ops::*, rc::Rc, sync::atomic::AtomicUsize};
 use crate::{
     byte_stream::{ByteStream, ReaderContext},
     error::Result,
-    frame::Frame,
+    frame::{Frame, FrameFlags},
     instructions::Instruction,
     rf::Rf,
     runtime::Runtime,
-    value::{runtime_pool, Value},
+    value::{runtime_pool, Value, Type},
 };
 
 pub struct Thread {
@@ -115,6 +115,65 @@ macro_rules! expand {
             $op; $($rest)*
         )
     };
+    (@phase2($($pat_final:pat => $body_final:tt),*) $op:expr; @aload $self:expr, $($pat:pat = $func:ident;)+, $($rest:tt)*) => {
+        expand!(
+            @phase2(
+                $($pat_final => $body_final,)*
+                $(
+                    $pat => {
+                        let index = $self.pop().$func() as usize;
+                        let array = $self.pop();
+                        let array = array.as_array();
+
+                        let vals = array.borrow_mut();
+                        $self.push(vals[index].clone());
+                    }
+                ),*
+            )
+
+            $op; $($rest)*
+        )
+    };
+    (@phase2($($pat_final:pat => $body_final:tt),*) $op:expr; @astore $self:expr, $($pat:pat = $func:ident;)+, $($rest:tt)*) => {
+        expand!(
+            @phase2(
+                $($pat_final => $body_final,)*
+                $(
+                    $pat => {
+
+                        let value = $self.pop();
+                        let index = $self.pop().$func() as usize;
+                        let array = $self.pop();
+                        let array = array.as_array();
+
+                        let mut vals = array.borrow_mut();
+                        vals[index] = value;
+                    }
+                ),*
+            )
+
+            $op; $($rest)*
+        )
+    };
+    (@phase2($($pat_final:pat => $body_final:tt),*) $op:expr; @ret $self:expr, $ip_override:expr, $($pat:pat = ;)+, $($rest:tt)*) => {
+        expand!(
+            @phase2(
+                $($pat_final => $body_final,)*
+                $(
+                    $pat => {
+                        let frames = $self.frames.take();
+                        if frames.len() == 1 {
+                            panic!("Main method should not return a value!");
+                        }
+
+                        $ip_override = Some($self.restore_popped_value(frames));
+                    }
+                ),*
+            )
+
+            $op; $($rest)*
+        )
+    };
     ($op:expr; $($t:tt)*) => {
         expand!(@phase2() $op; $($t)*)
     };
@@ -176,8 +235,11 @@ impl Thread {
             let mut ip_override = None;
             {
                 let frames = self.frames.take();
+                let stack = self.stack.take();
                 tracing::trace!("{:#?}", frames,);
+                tracing::trace!("{:#?}", stack,);
                 self.frames.set(frames);
+                self.stack.set(stack);
             }
 
             tracing::trace!(
@@ -214,6 +276,12 @@ impl Thread {
                         Instruction::DLoad2 = 2;
                         Instruction::DLoad3 = 3;
                     ,
+                    @load self, as_array,
+                        Instruction::ALoad0 = 0;
+                        Instruction::ALoad1 = 1;
+                        Instruction::ALoad2 = 2;
+                        Instruction::ALoad3 = 3;
+                    ,
                     @store self, as_int,
                         Instruction::IStore0 = 0;
                         Instruction::IStore1 = 1;
@@ -237,6 +305,24 @@ impl Thread {
                         Instruction::DStore1 = 1;
                         Instruction::DStore2 = 2;
                         Instruction::DStore3 = 3;
+                    ,
+                    @store self, as_array,
+                        Instruction::AStore0 = 0;
+                        Instruction::AStore1 = 1;
+                        Instruction::AStore2 = 2;
+                        Instruction::AStore3 = 3;
+                    ,
+                    @aload self,
+                        Instruction::IALoad = as_int;
+                    ,
+                    @astore self,
+                        Instruction::CAStore = as_char;
+                        Instruction::BAStore = as_byte;
+                        Instruction::SAStore = as_short;
+                        Instruction::IAStore = as_int;
+                        Instruction::LAStore = as_long;
+                        Instruction::FAStore = as_float;
+                        Instruction::DAStore = as_double;
                     ,
                     @checked self, overflowing_add, "addition",
                         Instruction::IAdd = as_int, "Integer";
@@ -960,33 +1046,120 @@ impl Thread {
 
                         ip_override = Some(self.restore_popped(frames));
                     },
-                    Instruction::PutStatic => {
+                    @ret self, ip_override,
+                        Instruction::IReturn =;
+                        Instruction::LReturn =;
+                        Instruction::FReturn =;
+                        Instruction::DReturn =;
+                    ,
+                    Instruction::ALoad => {
+                        let index = stream.read::<u8>(&ctx);
+                        let value = self.get_local(index);
+                        value.as_array();
+
+                        self.push(value);
+                    },
+                    Instruction::AStore => {
+                        let index = stream.read::<u8>(&ctx);
+                        let value = self.pop();
+                        value.as_array();
+                        
+                        self.set_local(index, value);
+                    },
+                    Instruction::NewArray => {
+                        let type_tag = stream.read::<u8>(&ctx);
+                        let count = self.pop().as_int() as usize;
+
+                        let vals = vec![Value::default_with_type(&Type::from_array_tag(type_tag)); count];
+
+                        self.push(Value::ArrayRef(Rf::new(vals)));
+                    },
+                    Instruction::ArrayLength => {
+                        let array = self.pop();  
+                        let array = array.as_array();
+
+                        let array = array.borrow();
+                        self.push(Value::Int(array.len() as i32));
+                    },
+                    Instruction::GetStatic => {
                         let index = stream.read::<u16>(&ctx);
                         tracing::debug!("{}", index);
-                        let value = self.pop();
 
                         let frames = self.frames.take();
                         let frame = frames.last().expect("Unable to retrieve current frame!");
 
-                        let (class, is_init) = {
-                            let mut rt = self.runtime.borrow_mut();
-                            let (class, _) = rt.get_field_by_index_mut(&frame.class_name, index).expect("Unable to get static field!");
-                            let is_init = rt.is_class_initialized(&class);
+                        // If we are initializing we don't want to start revursively initializing
+                        if !frame.flags.contains(FrameFlags::CLINIT) {
 
-                            (class, is_init)
-                        };
+                            let (class, is_init) = {
+                                let mut rt = self.runtime.borrow_mut();
+                                let (class, _) = rt.get_field_by_index_mut(&frame.class_name, index).expect("Unable to get static field!");
+                                let is_init = rt.is_class_initialized(&class);
 
-                        if !is_init {
-                            // We want to return to this instruction when done initializing.
-                            if let Some(ip) = self.initialize_class(ip, &class, index) {
-                                self.frames.set(frames);
-                                ip_override = Some(ip);
-                                break 'outer;
+                                (class, is_init)
+                            };
+
+                            self.frames.set(frames);
+                            if !is_init {
+                                // We want to return to this instruction when done initializing.
+                                if let Some(ip) = self.initialize_class(ip, &class, index) {
+                                    ip_override = Some(ip);
+                                    break 'outer;
+                                }
                             }
+                        } else {
+                            self.frames.set(frames);
                         }
+
+                        let frames = self.frames.take();
+                        let frame = frames.last().expect("Unable to retrieve current frame!");
+
+                        let rt = self.runtime.borrow_mut();
+                        let (class, name, field) = rt.get_field_by_index(&frame.class_name, index).expect("Unable to get static field!");
+
+                        self.push(field.value.clone());
+
+                        self.frames.set(frames);
+                    },
+                    Instruction::PutStatic => {
+                        let index = stream.read::<u16>(&ctx);
+                        tracing::debug!("{}", index);
+                        tracing::debug!("{:?}", &self);
+
+                        let frames = self.frames.take();
+                        tracing::debug!("{:?}", frames);
+                        let frame = frames.last().expect("Unable to retrieve current frame!");
+
+                        // If we are initializing we don't want to start revursively initializing
+                        if !frame.flags.contains(FrameFlags::CLINIT) {
+                            tracing::info!("CLINIT");
+                            let (class, is_init) = {
+                                let mut rt = self.runtime.borrow_mut();
+                                let (class, _) = rt.get_field_by_index_mut(&frame.class_name, index).expect("Unable to get static field!");
+                                let is_init = rt.is_class_initialized(&class);
+
+                                (class, is_init)
+                            };
+
+                            self.frames.set(frames);
+                            if !is_init {
+                                // We want to return to this instruction when done initializing.
+                                if let Some(ip) = self.initialize_class(ip, &class, index) {
+                                    ip_override = Some(ip);
+                                    break 'outer;
+                                }
+                            }
+                        } else {
+                            self.frames.set(frames);
+                        }
+
+                        let frames = self.frames.take();
+                        let frame = frames.last().expect("Unable to retrieve current frame!");
 
                         let mut rt = self.runtime.borrow_mut();
                         let (class, field) = rt.get_field_by_index_mut(&frame.class_name, index).expect("Unable to get static field!");
+
+                        let value = self.pop();
 
                         value.matches_type(&field.ty)
                             .then_some(())
@@ -1031,6 +1204,7 @@ impl Thread {
                                 let mut stack = self.stack.take();
                                 let params = &stack[stack.len() - param_len..];
 
+                                tracing::info!("{} {}", instructin_address, stream.index);
                                 let mut new_frame = Frame::new(stack.len() - param_len, instructin_address + 1, class.clone());
                                 new_frame.locals.extend(params.iter().cloned());
                                 frames.push(new_frame);
@@ -1090,7 +1264,7 @@ impl Thread {
         let mut frames = self.frames.take();
         let current = frames.last_mut().unwrap();
 
-        if index as usize > current.locals.len() {
+        if index as usize >= current.locals.len() {
             current.locals.resize(index as usize + 1, Value::Null);
         }
 
@@ -1118,17 +1292,18 @@ impl Thread {
             rt.get_or_load_class_item(&class_name, index)
                 .expect("Class not found!")
         };
+        rt.set_class_initialized(&class_name);
 
         let Some(method) = rt
             .get_method_by_name(&class_name, "<clinit>") else {
                 // If no clinit, there is nothing to run.
-                rt.set_class_initialized(&class_name);
                 self.frames.set(frames);
                 self.stack.set(stack);
                 return None;
         };
 
-        let new_frame = Frame::new(stack.len(), ip, class_name.clone());
+        let new_frame = Frame::new_clinit(stack.len(), ip, class_name.clone());
+        tracing::info!("{new_frame:?}");
         frames.push(new_frame);
 
         self.frames.set(frames);
@@ -1140,6 +1315,28 @@ impl Thread {
     // fn set_stack_index(&self, index: usize) -> {
 
     // }
+
+    
+    fn restore_popped_value(&self, mut frames: Vec<Frame>) -> usize {
+        let frame = frames.pop().unwrap();
+
+        let mut stack = self.stack.take();
+
+        tracing::info!("{:?}", stack);
+        if stack.len() != frame.base_pointer + 1 {
+            let value = stack.pop().expect("Expected a return value!");
+            stack.truncate(frame.base_pointer);
+            stack.push(value);
+        }
+        tracing::info!("{:?}", stack);
+
+
+        self.stack.set(stack);
+
+        self.frames.set(frames);
+
+        frame.return_pc
+    }
 
     fn restore_popped(&self, mut frames: Vec<Frame>) -> usize {
         let frame = frames.pop().unwrap();
