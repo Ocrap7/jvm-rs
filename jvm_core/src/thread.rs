@@ -1,4 +1,4 @@
-use std::{cell::Cell, ops::*, sync::atomic::AtomicUsize};
+use std::{cell::Cell, ops::*, rc::Rc, sync::atomic::AtomicUsize};
 
 use crate::{
     byte_stream::{ByteStream, ReaderContext},
@@ -161,14 +161,24 @@ impl Thread {
 
         loop {
             let ip = self.pc.load(std::sync::atomic::Ordering::Acquire);
-            let rt = self.runtime.borrow();
+            let bytes: [u8; 6] = {
+                let rt = self.runtime.borrow();
+                let mut instructions = rt.instructions()[ip..].iter();
 
-            let mut stream = ByteStream::new(&rt.instructions()[ip..]);
+                core::array::from_fn(|_| instructions.next().copied().unwrap_or(0))
+            };
+
+            let mut stream = ByteStream::new(&bytes[..]);
 
             let instructin_address = ip;
             let instruction = Instruction::from(stream.read::<u8>(&ctx));
 
             let mut ip_override = None;
+            {
+                let frames = self.frames.take();
+                tracing::trace!("{:#?}", frames,);
+                self.frames.set(frames);
+            }
 
             tracing::trace!(
                 "Execute Instructin: {:?} 0x{:x} @ {:x}",
@@ -687,6 +697,8 @@ impl Thread {
                     if value1 == value2 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ICmpNe => {
@@ -696,6 +708,8 @@ impl Thread {
                     if value1 != value2 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ICmpLt => {
@@ -705,6 +719,8 @@ impl Thread {
                     if value1 < value2 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ICmpGt => {
@@ -714,6 +730,8 @@ impl Thread {
                     if value1 > value2 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ICmpLe => {
@@ -723,6 +741,8 @@ impl Thread {
                     if value1 <= value2 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ICmpGe => {
@@ -732,6 +752,8 @@ impl Thread {
                     if value1 >= value2 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::LCmp => {
@@ -808,6 +830,8 @@ impl Thread {
                     if value1 == 0 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::INe => {
@@ -816,6 +840,8 @@ impl Thread {
                     if value1 != 0 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ILt => {
@@ -824,6 +850,8 @@ impl Thread {
                     if value1 < 0 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::IGt => {
@@ -832,6 +860,8 @@ impl Thread {
                     if value1 > 0 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::ILe => {
@@ -840,6 +870,8 @@ impl Thread {
                     if value1 <= 0 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::IGe => {
@@ -848,6 +880,8 @@ impl Thread {
                     if value1 >= 0 {
                         let offset = stream.read::<i16>(&ctx);
                         ip_override = Some(instructin_address.checked_add_signed(offset as isize).expect("Program counter overflow!"))
+                    } else {
+                        stream.index += 2;
                     }
                 },
                 Instruction::IfNull => {
@@ -860,6 +894,7 @@ impl Thread {
                         }
                         _ => ()
                     }
+                    stream.index += 2;
                 },
                 Instruction::IfNotNull => {
                     let value1 = self.pop();
@@ -871,6 +906,8 @@ impl Thread {
                         }
                         _ => ()
                     }
+
+                    stream.index += 2;
                 },
 
                 Instruction::Pop => {
@@ -920,13 +957,18 @@ impl Thread {
                         return Ok(0);
                     }
 
-                    self.restore_popped(frames);
+                    ip_override = Some(self.restore_popped(frames));
                 },
                 Instruction::InvokeStatic => {
                     let index = stream.read::<u16>(&ctx);
 
-                    let frames = self.frames.take();
+                    let mut frames = self.frames.take();
                     let frame = frames.last().expect("Unable to retrieve current call frame!");
+
+                    let mut rt = self.runtime.borrow_mut();
+                    let class = {
+                        rt.get_or_load_class_item(&frame.class_name, index).expect("Class not found!")
+                    };
 
                     let (class_name, method_name, method) = rt.get_method_by_index(&frame.class_name, index).expect("Method not found!");
 
@@ -934,17 +976,33 @@ impl Thread {
                         runtime_pool::Method::Native(method) => {
                             // TODO; check types
                             let param_len = method.params.len();
-                            let stack = self.stack.take();
+                            let mut stack = self.stack.take();
                             let params = &stack[stack.len() - param_len..];
-                            
+
                             let value = rt.invoke_native_function(&format!("{}.{}", class_name, method_name), params);
 
+                            stack.truncate(stack.len() - param_len);
                             self.stack.set(stack);
 
                             if method.return_ty.is_some() {
                                 self.push(value.expect("Expected return value!"));
                             }
                         }
+                        runtime_pool::Method::Java(method) => {
+                            // TODO: check types
+                            let param_len = method.params.len();
+                            let mut stack = self.stack.take();
+                            let params = &stack[stack.len() - param_len..];
+
+                            let mut new_frame = Frame::new(stack.len() - param_len, instructin_address + 1, class.clone());
+                            new_frame.locals.extend(params.iter().cloned());
+                            frames.push(new_frame);
+
+                            ip_override = Some(method.code_index);
+
+                            stack.truncate(stack.len() - param_len);
+                            self.stack.set(stack);
+                        },
                         _ => (),
                     }
 
@@ -1017,17 +1075,16 @@ impl Thread {
 
     // }
 
-    fn restore_popped(&self, mut frames: Vec<Frame>) {
+    fn restore_popped(&self, mut frames: Vec<Frame>) -> usize {
         let frame = frames.pop().unwrap();
-
-        self.pc
-            .store(frame.return_pc, std::sync::atomic::Ordering::SeqCst);
 
         let mut stack = self.stack.take();
         stack.truncate(frame.base_pointer);
         self.stack.set(stack);
 
         self.frames.set(frames);
+
+        frame.return_pc
     }
 
     fn restore(&self) -> Option<()> {

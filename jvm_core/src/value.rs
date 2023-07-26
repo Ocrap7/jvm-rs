@@ -246,11 +246,12 @@ impl Value {
     pub fn as_int(&self) -> i32 {
         match self {
             Self::Int(i) => *i,
-            _ => panic!("Expected int value!"),
+            _ => panic!("Expected int value! Found {}", self),
         }
     }
 
     pub fn as_long(&self) -> i64 {
+        // std::array::from
         match self {
             Self::Long(i) => *i,
             _ => panic!("Expected long value!"),

@@ -9,3 +9,4 @@ edition = "2021"
 bitflags = "2.3.3"
 jvm-macros = { path = "../jvm_macros" }
 tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }

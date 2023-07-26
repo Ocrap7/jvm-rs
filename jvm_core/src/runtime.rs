@@ -130,7 +130,6 @@ impl Runtime {
                 method
                     .code()
                     .map(|code| {
-
                         let method = Method::Java(JavaMethod {
                             max_locals: code.max_locals,
                             max_stack: code.max_stack,
@@ -169,6 +168,15 @@ impl Runtime {
             .expect(&format!("Class '{}' not found", class))
     }
 
+    pub fn get_or_load_class(&mut self, class_name: &Rc<str>) -> Result<Rc<str>> {
+        if let Some((k, _)) = self.runtime_pool.get_key_value(class_name) {
+            return Ok(k.clone());
+        } else {
+            self.load_class(class_name)?;
+            self.link_class(class_name)
+        }
+    }
+
     pub fn get_name_and_type(&self, class: &str, index: u16) -> Option<(&str, &str)> {
         let Some(file) = self.class_files.get(class) else {
             return None;
@@ -187,6 +195,31 @@ impl Runtime {
         };
 
         Some((name.as_str(), descriptor.as_str()))
+    }
+
+    /// Load a class item if it hasn't been already.
+    /// 
+    /// `class` is the name of the current class file. This is used to read the constant pool
+    /// `index` is an index into the `class`'s constant pool
+    pub fn get_or_load_class_item(&mut self, class: &str, index: u16) -> Option<Rc<str>> {
+        let class_name = {
+            let Some(file) = self.class_files.get(class) else {
+                return None;
+            };
+
+            let (ConstantPool::MethodRef(cref) | ConstantPool::FieldRef(cref) | ConstantPool::InterfaceMethodRef(cref)) = file.pool(index as usize) else {
+                return None;
+            };
+
+            let ConstantPool::Class(class_pool) = file.pool(cref.class_index as usize) else {
+                return None
+            };
+
+            let class_name = file.get_str(class_pool.name_index as usize);
+            Rc::from(class_name)
+        };
+
+        self.get_or_load_class(&class_name).ok()
     }
 
     pub fn get_method_by_index(
@@ -231,7 +264,8 @@ impl Runtime {
         func(params)
     }
 
-    fn setup_native_functions() -> HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value> + 'static>> {
+    fn setup_native_functions() -> HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value> + 'static>>
+    {
         // let funcs = [("as".to_string(), Box::new(|| {}) as Box<dyn Fn()>)];
         let mut funcs = HashMap::new();
 
